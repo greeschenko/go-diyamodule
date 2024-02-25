@@ -1,20 +1,31 @@
 package diyamodule
 
 import (
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/go-rest-framework/core"
+	"github.com/jinzhu/gorm"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"strings"
+	"time"
 )
 
 var App core.App
 var ACQUIRER_TOKEN string
 var AUTH_ACQUIRER_TOKEN string
 var URL = "api2s.diia.gov.ua"
+
+type DiyaData struct {
+	gorm.Model
+	Userrequestid string `json:"userrequestid"`
+	Deeplink      string `json:"deeplink"`
+	Rawdata       string `json:"rawdata"`
+}
 
 type TokenRequesData struct {
 	Token string `json:"token"`
@@ -28,13 +39,30 @@ type DeepLinkData struct {
 	Deeplink string `json:"deeplink"`
 }
 
+type DiyaDeepLinkRes struct {
+	DeepLink      string `json:"deeplink"`
+	UserRequestID string `json:"userrequestid"`
+}
+
+func GenMD5Hash() string {
+	hash := md5.Sum([]byte(time.Now().Format("2006.01.02 15:04:05")))
+	return hex.EncodeToString(hash[:])
+}
+
 func Configure(a core.App, acquirer_token string, auth_acquirer_token string) {
 	fmt.Println("DIYA module started")
 	App = a
+
+	App.DB.AutoMigrate(
+		&DiyaData{},
+	)
+
 	ACQUIRER_TOKEN = acquirer_token
 	AUTH_ACQUIRER_TOKEN = auth_acquirer_token
 
 	App.R.HandleFunc("/diya/test", actionDiyaTest).Methods("GET")
+	App.R.HandleFunc("/diya/data", actionDiyaData).Methods("GET")
+	App.R.HandleFunc("/diya/point", actionDiyaPoint).Methods("POST")
 }
 
 func doRequest(url, proto, userJson, auth string) *http.Response {
@@ -180,36 +208,82 @@ func RequestDeeplink(branch_id, offer_id, session_token, request_id string) (str
 }
 
 func actionDiyaTest(w http.ResponseWriter, r *http.Request) {
+	var (
+		model DiyaDeepLinkRes
+		rsp   = core.Response{Data: &model, Req: r}
+	)
+
 	w.Header().Set("Content-Type", "application/json")
 	session_token, err := RequestSessionToken()
 	if err != nil {
-		fmt.Println(err)
-		w.Write([]byte(`{"error":true}`))
+		log.Println(err)
+		rsp.Errors.Add("api", string(err.Error()))
+
 		return
 	}
 	fmt.Println("SESSION_TOKEN", session_token)
 	branch_id, err := CreateBranch("Bearer " + session_token)
 	if err != nil {
-		fmt.Println(err)
-		w.Write([]byte(`{"error":true}`))
+		log.Println(err)
+		rsp.Errors.Add("api", string(err.Error()))
+
 		return
 	}
 	fmt.Println("BRANCH_ID", branch_id)
 	offer_id, err := CreateOffer(branch_id, "Bearer "+session_token)
 	if err != nil {
-		fmt.Println(err)
-		w.Write([]byte(`{"error":true}`))
+		log.Println(err)
+		rsp.Errors.Add("api", string(err.Error()))
+
 		return
 	}
 	fmt.Println("OFFER_ID", offer_id)
 
-	deeplink, err := RequestDeeplink(branch_id, offer_id, "Bearer "+session_token, "9174eadaca8d1f1dbe2e8f0685c6753f")
+	userRequestId := GenMD5Hash()
+
+	deeplink, err := RequestDeeplink(branch_id, offer_id, "Bearer "+session_token, userRequestId)
 	if err != nil {
-		fmt.Println(err)
-		w.Write([]byte(`{"error":true}`))
+		log.Println(err)
+		rsp.Errors.Add("api", string(err.Error()))
+
 		return
 	}
+
+    App.DB.Create(&DiyaData{Userrequestid: userRequestId, Deeplink: deeplink})
+
 	fmt.Println("DEEPLINK", deeplink)
 
-	w.Write([]byte(`{"success":"` + deeplink + `"}`))
+	model.DeepLink = deeplink
+	model.UserRequestID = userRequestId
+
+	w.Write(rsp.Make())
+}
+
+func actionDiyaPoint(w http.ResponseWriter, r *http.Request) {
+
+	if r.URL.Query().Get("request_id") == "23f25b64bafb0d6c88b1e009b60d527d" {
+        w.Header().Set("Content-Type", "application/json")
+        body, err := ioutil.ReadAll(r.Body)
+        if err != nil {
+            log.Fatal(err)
+        }
+        App.DB.Create(&DiyaData{Rawdata: string(body)})
+		w.Write([]byte(`{"success":true}`))
+	} else {
+		w.WriteHeader(http.StatusForbidden)
+	}
+}
+
+func actionDiyaData(w http.ResponseWriter, r *http.Request) {
+	var (
+		data   []DiyaData
+		rsp    = core.Response{Data: &data, Req: r}
+	)
+
+	//App.DB.Where(&Cdb3Token{El_type: "Bid", Parent: vars["id"]}).Find(&tokens)
+	App.DB.Find(&data)
+
+	rsp.Data = data
+
+	w.Write(rsp.Make())
 }
