@@ -1,6 +1,7 @@
 package diyamodule
 
 import (
+	"bufio"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
@@ -8,9 +9,10 @@ import (
 	"fmt"
 	"github.com/go-rest-framework/core"
 	"github.com/jinzhu/gorm"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -87,13 +89,13 @@ func RequestSessionToken() (string, error) {
 	var tokenData TokenRequesData
 	resp := doRequest("https://"+URL+"/api/v1/auth/acquirer/"+ACQUIRER_TOKEN, "GET", "", "Basic "+AUTH_ACQUIRER_TOKEN)
 	if resp.StatusCode != 201 && resp.StatusCode != 200 {
-		body, err := ioutil.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		defer resp.Body.Close()
 		if err != nil {
 			return "", errors.New("ERROR session token request " + string(body))
 		}
 	} else {
-		body, err := ioutil.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -130,14 +132,14 @@ func CreateBranch(session_token string) (string, error) {
 	resp := doRequest("https://"+URL+"/api/v2/acquirers/branch", "POST", data, session_token)
 
 	if resp.StatusCode != 201 && resp.StatusCode != 200 {
-		body, err := ioutil.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			fmt.Println("Error body read", err)
 		}
 		defer resp.Body.Close()
 		return "", errors.New("ERROR branch create " + string(body))
 	} else {
-		body, err := ioutil.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -163,14 +165,14 @@ func CreateOffer(branch_id, session_token string) (string, error) {
 	resp := doRequest("https://"+URL+"/api/v1/acquirers/branch/"+branch_id+"/offer", "POST", data, session_token)
 
 	if resp.StatusCode != 201 && resp.StatusCode != 200 {
-		body, err := ioutil.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			fmt.Println("Error body read", err)
 		}
 		defer resp.Body.Close()
 		return "", errors.New("ERROR offer create " + string(body))
 	} else {
-		body, err := ioutil.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -190,14 +192,14 @@ func RequestDeeplink(branch_id, offer_id, session_token, request_id string) (str
 	resp := doRequest("https://"+URL+"/api/v2/acquirers/branch/"+branch_id+"/offer-request/dynamic", "POST", data, session_token)
 
 	if resp.StatusCode != 201 && resp.StatusCode != 200 {
-		body, err := ioutil.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			fmt.Println("Error body read", err)
 		}
 		defer resp.Body.Close()
 		return "", errors.New("ERROR request deeplink " + string(body))
 	} else {
-		body, err := ioutil.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -249,7 +251,7 @@ func actionDiyaTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-    App.DB.Create(&DiyaData{Userrequestid: userRequestId, Deeplink: deeplink})
+	App.DB.Create(&DiyaData{Userrequestid: userRequestId, Deeplink: deeplink})
 
 	fmt.Println("DEEPLINK", deeplink)
 
@@ -261,14 +263,66 @@ func actionDiyaTest(w http.ResponseWriter, r *http.Request) {
 
 func actionDiyaPoint(w http.ResponseWriter, r *http.Request) {
 
+	trace := r.Header.Get("X-Document-Request-Trace-Id")
+
 	if r.URL.Query().Get("request_id") == "23f25b64bafb0d6c88b1e009b60d527d" {
-        w.Header().Set("Content-Type", "application/json")
-        body, err := ioutil.ReadAll(r.Body)
-        if err != nil {
-            log.Fatal(err)
-        }
-        App.DB.Create(&DiyaData{Rawdata: string(body)})
-		w.Write([]byte(`{"success":true}`))
+		w.Header().Set("Content-Type", "application/json")
+		err := r.ParseMultipartForm(32 << 20)
+		if err != nil {
+			fmt.Fprintf(w, "%s", err)
+		} else {
+			for _, value := range r.MultipartForm.Value {
+				for _, vv := range value {
+					err := os.WriteFile("/go/src/app/"+trace+"_encodedData.json.p7s.p7e", []byte(vv), 0644)
+
+					if err != nil {
+						fmt.Println(err)
+						return
+					}
+
+					fmt.Println("VVVVVV", "data saved to encodedData.json.p7s.p7e")
+				}
+
+			}
+			for _, values := range r.MultipartForm.File {
+				for _, value := range values {
+					file, err := value.Open()
+					if err != nil {
+						log.Fatal(err)
+					}
+					defer file.Close()
+					scanner := bufio.NewScanner(file)
+					fmt.Println("FFFFFF", value.Filename, value.Size)
+
+					buf := make([]byte, 350000)
+					scanner.Buffer(buf, 350000)
+
+					if !scanner.Scan() {
+                        fmt.Println("SCAN ERR", scanner.Err().Error())
+					}
+
+					if strings.Contains(value.Filename, "internal-passport") && strings.Contains(value.Filename, "p7e") {
+						tmpfilename := trace + "_" + "passport.pdf.p7s.p7e"
+						err := os.WriteFile("/go/src/app/"+tmpfilename, scanner.Bytes(), 0644)
+
+						if err != nil {
+							fmt.Println(err)
+							return
+						}
+					} else if strings.Contains(value.Filename, "taxpayer") && strings.Contains(value.Filename, "p7e") {
+						tmpfilename := trace + "_" + "ipn.pdf.p7s.p7e"
+						err := os.WriteFile("/go/src/app/"+tmpfilename, scanner.Bytes(), 0644)
+
+						if err != nil {
+							fmt.Println(err)
+							return
+						}
+					}
+
+				}
+			}
+			w.Write([]byte(`{"success":true}`))
+		}
 	} else {
 		w.WriteHeader(http.StatusForbidden)
 	}
@@ -276,8 +330,8 @@ func actionDiyaPoint(w http.ResponseWriter, r *http.Request) {
 
 func actionDiyaData(w http.ResponseWriter, r *http.Request) {
 	var (
-		data   []DiyaData
-		rsp    = core.Response{Data: &data, Req: r}
+		data []DiyaData
+		rsp  = core.Response{Data: &data, Req: r}
 	)
 
 	//App.DB.Where(&Cdb3Token{El_type: "Bid", Parent: vars["id"]}).Find(&tokens)
